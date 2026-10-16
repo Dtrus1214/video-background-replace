@@ -1,0 +1,14 @@
+# Only export/validation uses Python. Install a compatible torch/torchvision pair.
+torch>=2.9
+torchvision
+numpy
+onnx>=1.16
+onnxruntime>=1.20
+hydra-core>=1.3
+omegaconf>=2.3
+opencv-python>=4.8
+Pillow
+imageio
+tqdm
+huggingface-hub==0.36.2
+einops

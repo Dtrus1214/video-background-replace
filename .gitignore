@@ -1,0 +1,17 @@
+/build/
+/external/
+/results/
+/media/
+*.mp4
+*.avi
+*.pth
+/.venv/
+/models/
+*.onnx
+*.data
+__pycache__/
+/offline/wheels/
+/offline/test-env/
+/.venv-offline/
+/offline
+/.venv-offline310/
