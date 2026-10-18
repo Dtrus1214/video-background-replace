@@ -1,0 +1,7 @@
+{
+  "frames": 48,
+  "fps": 23.76,
+  "cpp_python_mask_iou": 0.9998847395112955,
+  "blank_frame_rejected": true,
+  "missing_detector_rejected": true
+}

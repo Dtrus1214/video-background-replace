@@ -1,4 +1,4 @@
-"""MatAnyone 2 ONNX inference and video background replacement (no PyTorch)."""
+"""MatAnyone 2 background replacement using local PyTorch weights or ONNX."""
 import argparse
 import math
 from pathlib import Path
@@ -6,7 +6,6 @@ import sys
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 
 class MatAnyoneOnnx:
@@ -18,6 +17,7 @@ class MatAnyoneOnnx:
     """
 
     def __init__(self, bundle):
+        import onnxruntime as ort
         bundle = Path(bundle)
         fields = (bundle / 'model.txt').read_text().split()
         if len(fields) != 7 or fields[0] != 'MATANYONE2_ONNX_V1':
@@ -133,27 +133,127 @@ def cover(image, width, height):
     return resized[y:y+height, x:x+width]
 
 
+class BackgroundMedia:
+    """Image or looping video sampled at the foreground video's timestamps.
+
+    Sequential decoding avoids relying on a codec's frame-count/seek accuracy.
+    Background audio is ignored; only one decoded background frame is retained.
+    """
+
+    def __init__(self, path, start=0.0, end=None):
+        if not math.isfinite(start) or start < 0 or (end is not None and (not math.isfinite(end) or end <= start)):
+            raise ValueError('Background start must be >= 0 and end must be greater than start (seconds).')
+        self.path = str(path)
+        self.capture = None
+        self.image = cv2.imread(self.path) if cv2.haveImageReader(self.path) else None
+        self.position = 0
+        self.cached_key = None
+        if self.image is not None:
+            if start != 0 or end is not None:
+                raise ValueError('Background start/end apply to videos, not images.')
+            return
+        self.capture = cv2.VideoCapture(self.path)
+        self.fps = self.capture.get(cv2.CAP_PROP_FPS)
+        if not self.capture.isOpened() or not math.isfinite(self.fps) or self.fps <= 0:
+            self.close()
+            raise ValueError('Cannot read background image/video or its frame rate.')
+        self.start_frame = math.ceil(start * self.fps - 1e-9)
+        self.clip_frames = None if end is None else math.ceil(end * self.fps - 1e-9) - self.start_frame
+        if self.clip_frames is not None and self.clip_frames <= 0:
+            self.close()
+            raise ValueError('Selected background interval contains no frames.')
+        try:
+            self._restart()
+        except Exception:
+            self.close()
+            raise
+
+    def _restart(self):
+        self.capture.release()
+        self.capture = cv2.VideoCapture(self.path)
+        for _ in range(self.start_frame):
+            if not self.capture.grab():
+                raise ValueError('Background start is beyond the available video.')
+        ok, self.frame = self.capture.read()
+        if not ok:
+            raise ValueError('No background frame is available at the selected start.')
+        self.clip_position = 0
+
+    def at(self, source_index, source_fps, width, height):
+        if source_index < 0 or not math.isfinite(source_fps) or source_fps <= 0:
+            raise ValueError('Invalid source timestamp.')
+        target = 0 if self.image is not None else math.floor(source_index * self.fps / source_fps + 1e-9)
+        if target < self.position:
+            raise ValueError('Background frames must be requested in chronological order.')
+        while self.position < target:
+            if self.clip_frames is not None and self.clip_position + 1 >= self.clip_frames:
+                self._restart()
+            else:
+                ok, frame = self.capture.read()
+                if not ok:
+                    self._restart()
+                else:
+                    self.frame = frame
+                    self.clip_position += 1
+            self.position += 1
+        key = (target, width, height)
+        if key != self.cached_key:
+            frame = self.image if self.image is not None else self.frame
+            self.cached = cover(frame, width, height).astype(np.float32)
+            self.cached_key = key
+        return self.cached
+
+    def close(self):
+        if self.capture is not None:
+            self.capture.release()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('input', 'background', 'model', 'mask', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
+    for name in ('input', 'background', 'model', 'output'):
+        parser.add_argument('--' + name, type=Path, required=True,
+                            help='Image or looping video file.' if name == 'background' else None)
+    parser.add_argument('--mask', type=Path, help='Optional first-frame mask; automatically detects people when omitted.')
+    parser.add_argument('--person-model', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'models/person-segmentation.pth',
+                        help='Local person-segmentation weights for automatic initialization.')
+    parser.add_argument('--save-initial-mask', type=Path, help='Optionally save the automatically generated first-frame mask.')
     parser.add_argument('--alpha-dir', type=Path, help='Optional new directory for 16-bit alpha PNGs.')
+    parser.add_argument('--background-start', type=float, default=0.0, help='Background clip start in seconds (inclusive).')
+    parser.add_argument('--background-end', type=float, help='Background clip end in seconds (exclusive); defaults to video end.')
+    parser.add_argument('--backend', choices=('auto', 'torch', 'onnx'), default='auto',
+                        help='Auto selects PyTorch for .pt/.pth files, ONNX for a bundle directory.')
+    parser.add_argument('--device', choices=('cpu', 'cuda'), default='cpu', help='PyTorch device; ONNX currently supports CPU only.')
+    parser.add_argument('--inference-width', type=int, default=512, help='PyTorch processing width (multiple of 16).')
+    parser.add_argument('--inference-height', type=int, default=288, help='PyTorch processing height (multiple of 16).')
     args = parser.parse_args()
     if args.output.suffix.lower() != '.avi' or args.output.exists():
         parser.error('Choose a new .avi output filename.')
     if args.alpha_dir and args.alpha_dir.exists():
         parser.error('Alpha output directory already exists.')
-    background = cv2.imread(str(args.background))
-    mask = cv2.imread(str(args.mask), cv2.IMREAD_GRAYSCALE)
-    if background is None or mask is None:
-        parser.error('Cannot read background image or first-frame mask.')
+    if args.save_initial_mask and args.save_initial_mask.exists():
+        parser.error('Initial-mask output file already exists.')
+    mask = cv2.imread(str(args.mask), cv2.IMREAD_GRAYSCALE) if args.mask else None
+    if args.mask and mask is None:
+        parser.error('Cannot read first-frame mask.')
     capture = cv2.VideoCapture(str(args.input))
     writer = None
+    background = None
     try:
         fps = capture.get(cv2.CAP_PROP_FPS)
         if not capture.isOpened() or not math.isfinite(fps) or fps <= 0:
             raise ValueError('Cannot open input video or read its frame rate.')
-        model = MatAnyoneOnnx(args.model)
+        background = BackgroundMedia(args.background, args.background_start, args.background_end)
+        backend = args.backend
+        if backend == 'auto':
+            backend = 'torch' if args.model.suffix.lower() in ('.pt', '.pth') else 'onnx'
+        if backend == 'torch':
+            from matanyone_torch import MatAnyoneTorch
+            model = MatAnyoneTorch(args.model, args.inference_width, args.inference_height, args.device)
+        else:
+            if args.device != 'cpu':
+                raise ValueError('The ONNX backend currently supports --device cpu only.')
+            model = MatAnyoneOnnx(args.model)
         if args.alpha_dir:
             args.alpha_dir.mkdir(parents=True, exist_ok=False)
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -162,14 +262,23 @@ def main():
             ok, frame = capture.read()
             if not ok:
                 break
+            if count == 0 and mask is None:
+                from auto_mask import generate_person_mask
+                print('Detecting people in the first frame...', flush=True)
+                mask = generate_person_mask(frame, args.person_model, args.device)
+                print('Person detected; starting video matting.', flush=True)
+            if count == 0 and args.save_initial_mask:
+                args.save_initial_mask.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(args.save_initial_mask), mask):
+                    raise RuntimeError('Cannot save the initial person mask.')
             alpha = model.initialize(frame, mask) if count == 0 else model.step(frame)
             if writer is None:
                 height, width = frame.shape[:2]
-                fitted = cover(background, width, height).astype(np.float32)
                 writer = cv2.VideoWriter(str(args.output), cv2.VideoWriter_fourcc(*'MJPG'), fps, (width, height))
                 if not writer.isOpened():
                     raise RuntimeError('Cannot create output video.')
             a = alpha[:, :, None]
+            fitted = background.at(count, fps, frame.shape[1], frame.shape[0])
             result = np.rint(frame.astype(np.float32) * a + fitted * (1 - a)).clip(0, 255).astype(np.uint8)
             writer.write(result)
             if args.alpha_dir:
@@ -182,6 +291,8 @@ def main():
         print(f'Wrote {count} frames to {args.output}')
     finally:
         capture.release()
+        if background is not None:
+            background.close()
         if writer is not None:
             writer.release()
 

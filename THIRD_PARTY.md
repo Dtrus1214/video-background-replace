@@ -16,3 +16,22 @@ ONNX Runtime: MIT, https://github.com/microsoft/onnxruntime
 OpenCV 4.11: Apache-2.0, https://github.com/opencv/opencv
 
 Dependencies and weights are external and are not committed to this project.
+
+The direct Python checkpoint backend includes an unmodified copy of the upstream
+`matanyone2` inference/model/config/utility package in `python/vendor/`, with its
+license notice. Unlike the downloaded weights and wheels, this small source
+package is retained as project source for offline operation.
+
+Automatic first-frame masks use torchvision's DeepLabV3 MobileNetV3-Large
+COCO-with-VOC-labels checkpoint, downloaded from:
+https://download.pytorch.org/models/deeplabv3_mobilenet_v3_large-fc3c493d.pth
+
+Local file: `models/person-segmentation.pth` (44,356,159 bytes).
+SHA-256: `fc3c493d68e89cc31ef488c803d5d7dd2f3190fb570598faa49fef69be8e5e70`.
+The torchvision source license is retained in `licenses/Torchvision-LICENSE.txt`.
+Model/data terms remain those of the original providers.
+
+`models/person-segmentation.onnx` is an inference export of the same detector
+weights for C++. Its export metadata, source checkpoint hash, and ONNX hash are
+recorded in `models/person-segmentation.json`. Conversion does not change the
+original model's terms.

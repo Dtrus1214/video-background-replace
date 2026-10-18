@@ -1,0 +1,7 @@
+{
+  "network_connections_blocked": true,
+  "sample_iou": 0.823960226665241,
+  "mask_pixels": 17350,
+  "blank_frame_rejected": true,
+  "missing_checkpoint_rejected": true
+}

@@ -15,3 +15,5 @@ __pycache__/
 /.venv-offline/
 /offline
 /.venv-offline310/
+/offline/python310-pytorch/wheels/
+/.venv-pytorch/

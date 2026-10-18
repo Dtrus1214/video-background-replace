@@ -1,4 +1,5 @@
-# Only export/validation uses Python. Install a compatible torch/torchvision pair.
+# ONNX export/validation dependencies (separate from the checkpoint app's CPU bundle).
+# Install a compatible torch/torchvision pair.
 torch>=2.9
 torchvision
 numpy
